@@ -1,0 +1,1 @@
+Get-Process systemapp -ErrorAction SilentlyContinue | Stop-Process -Force; Remove-Item -Recurse -Force "$env:LOCALAPPDATA\systemapp" -ErrorAction SilentlyContinue; Remove-Item -Force "$HOME\.systemapp.env" -ErrorAction SilentlyContinue; Write-Host "Удалено" -ForegroundColor Green
