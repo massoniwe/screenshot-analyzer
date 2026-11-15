@@ -5,6 +5,8 @@ Windows клиент для анализа скриншотов.
     Shift+A  — скриншот всего экрана и отправка на сервер
     Shift+D  — показать/скрыть окно с ответом
     Shift+Q  — выход
+    Громкость −  — то же, что Shift+A (кнопка на Bluetooth-пульте)
+    Громкость +  — то же, что Shift+D
 
 На Windows глобальные хоткеи работают без каких-либо разрешений.
 Окно оверлея скрывается от записи экрана через SetWindowDisplayAffinity
@@ -18,6 +20,8 @@ import os
 import io
 import ctypes
 import logging
+import threading
+from ctypes import wintypes
 
 import requests
 from PIL import ImageGrab
@@ -82,6 +86,67 @@ class ScreenshotWorker(QThread):
 
 
 # --------------------------------------------------------------------------
+# Клавиши громкости: перехват без изменения звука
+# --------------------------------------------------------------------------
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+VK_VOLUME_DOWN = 0xAE
+VK_VOLUME_UP = 0xAF
+LRESULT = ctypes.c_ssize_t
+HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+
+class MediaKeyBlocker(threading.Thread):
+    """Ловит «громкость −/+» низкоуровневым хуком и глушит их, чтобы звук не менялся."""
+
+    def __init__(self, on_down, on_up):
+        super().__init__(daemon=True)
+        self.on_down = on_down
+        self.on_up = on_up
+
+    def run(self):
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.SetWindowsHookExW.restype = wintypes.HHOOK
+        user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+        user32.CallNextHookEx.restype = LRESULT
+        user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+        def proc(code, wparam, lparam):
+            if code == 0:
+                vk = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents.vkCode
+                if vk in (VK_VOLUME_DOWN, VK_VOLUME_UP):
+                    if wparam == WM_KEYDOWN:
+                        if vk == VK_VOLUME_DOWN:
+                            self.on_down()
+                        else:
+                            self.on_up()
+                    return 1
+            return user32.CallNextHookEx(None, code, wparam, lparam)
+
+        self._proc = HOOKPROC(proc)
+        hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._proc, kernel32.GetModuleHandleW(None), 0)
+        if not hook:
+            logger.warning("⚠️ Не удалось установить хук клавиш громкости")
+            return
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+
+
+# --------------------------------------------------------------------------
 # Окно-оверлей (скрыто от записи экрана)
 # --------------------------------------------------------------------------
 class Overlay(QMainWindow):
@@ -112,9 +177,19 @@ class Overlay(QMainWindow):
         self.listener.daemon = True
         self.listener.start()
         logger.info("✅ Хоткеи зарегистрированы: Shift+A / Shift+D / Shift+Q / , / .")
+        self._start_media_listener()
         self._start_mouse_listener()
 
         QTimer.singleShot(200, self._hide_from_capture)
+
+    # ---- Bluetooth-кнопки: «громкость −» — скриншот, «громкость +» — окно ----
+    def _start_media_listener(self):
+        self.media_blocker = MediaKeyBlocker(
+            on_down=lambda: self.sig_capture.emit(),
+            on_up=lambda: self.sig_toggle.emit(),
+        )
+        self.media_blocker.start()
+        logger.info("✅ Громкость −/+: скриншот / окно (звук не меняется)")
 
     # ---- мышь: ПКМ — показать/скрыть, скролл вниз — скриншот ----
     def _start_mouse_listener(self):
@@ -281,8 +356,8 @@ def main():
     print("=" * 52)
     print("🔒 Помощник (Windows) запущен")
     print(f"🌐 Сервер: {SERVER_URL}")
-    print("   Shift+A — скриншот и анализ")
-    print("   Shift+D — показать/скрыть ответ")
+    print("   Shift+A — скриншот и анализ (также кнопка «громкость −»)")
+    print("   Shift+D — показать/скрыть ответ (также кнопка «громкость +»)")
     print("   Shift+Q — выход")
     print("=" * 52)
     logger.info("🚀 Жду хоткеи...")
